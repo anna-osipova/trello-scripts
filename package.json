@@ -1,0 +1,12 @@
+{
+  "name": "trello-weekmenu-lambda",
+  "version": "0.1.0",
+  "description": "",
+  "author": "Xavier Decuyper",
+  "license": "MIT",
+  "dependencies": {
+    "make-runnable": "^1.3.6",
+    "request": "^2.72.0",
+    "yaml-env-config": "^1.1.0"
+  }
+}

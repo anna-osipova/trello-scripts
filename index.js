@@ -21,6 +21,7 @@ const API_AUTH = '&key=' + API_KEY + '&token=' + API_TOKEN;
 const RESET_DAY = 6; // Sunday
 const NAME_BACKLOG_COLUMN = "Backlog";
 const NAME_TODAY_COLUMN = "Today";
+const NAME_TOMORROW_COLUMN = "Tomorrow";
 
 let DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 
@@ -42,6 +43,10 @@ module.exports.meal = (event, context, callback) => {
 
 module.exports.due = (event, context, callback) => {
     moveDue();
+}
+
+module.exports.tomorrow = (event, context, callback) => {
+  moveTomorrowToToday();
 }
 
 function orderBoard(currentDay) {
@@ -110,7 +115,7 @@ function resetBoard(callback) {
 }
 
 function resetCardPosition(card, backlogColumnObject) {
-    console.log('--> Resetting card ' + card.id + ' to backlog list ' + backlogColumnObject.id);
+    console.log('--> Resetting card ' + card.id + ' to list' + backlogColumnObject.name + ' ' + backlogColumnObject.id);
 
     REQUEST.put(API_URL + '/cards/' + card.id)
         .form({
@@ -167,6 +172,31 @@ function setPositionOfList(listId, position) {
         });
 }
 
+function moveTomorrowToToday() {
+  getAllListsOnTrello(TODO_BOARD_ID, function(listsOnTrello) {
+    let todayColumn = null, tomorrowColumn = null;
+
+    while (todayColumn === null || tomorrowColumn === null) {
+       let el = listsOnTrello.shift();
+
+      if (el.name === NAME_TODAY_COLUMN) {
+        todayColumn = el;
+      } else if (el.name === NAME_TOMORROW_COLUMN) {
+        tomorrowColumn = el;
+      }
+    }
+
+    getAllCardsWithListId(TODO_BOARD_ID, function(cards) {
+      cards.forEach((card) => {
+        if (card.idList === tomorrowColumn.id) {
+          // Moving card to today
+          resetCardPosition(card, todayColumn);
+        }
+      });
+    });
+  });
+}
+
 function moveDue() {
     const today = new Date();
     getAllListsOnTrello(TODO_BOARD_ID, function(listsOnTrello) {
@@ -193,6 +223,19 @@ function moveDue() {
                 }
             });
         });
+    });
+}
+
+function getAllCardsWithListId(boardId, callback) {
+    REQUEST(API_URL + '/boards/' + boardId + '/cards?fields=name,idList' + API_AUTH, function(error, response, body) {
+
+        // Stop if there was an error
+        if (error || response.statusCode != 200) {
+            callback("Could not fetch Trello cards", null);
+            return false;
+        }
+
+        callback(JSON.parse(body));
     });
 }
 

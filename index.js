@@ -22,6 +22,7 @@ const RESET_DAY = 6; // Sunday
 const NAME_BACKLOG_COLUMN = "Backlog";
 const NAME_TODAY_COLUMN = "Today";
 const NAME_TOMORROW_COLUMN = "Tomorrow";
+const NAME_DONE_COLUMN = "Done";
 
 let DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 
@@ -201,6 +202,7 @@ function moveDue() {
     const today = new Date();
     getAllListsOnTrello(TODO_BOARD_ID, function(listsOnTrello) {
         let todayColumn = null;
+        let doneColumn = null;
 
         while (todayColumn === null) {
             // Take the first list
@@ -211,10 +213,19 @@ function moveDue() {
             }
         }
 
+        while (doneColumn === null) {
+            // Take the first list
+            let el = listsOnTrello.shift();
+
+            if (el.name === NAME_DONE_COLUMN) {
+                doneColumn = el;
+            }
+        }
+
         getAllDueCards(TODO_BOARD_ID, function(cards) {
             console.log("> Updating due cards");
             cards.forEach(function(card) {
-                if (card.due !== null) {
+                if (card.due !== null && card.idList !== doneColumn.id) {
                     const due = new Date(card.due);
                     if (due.toISOString().split('T')[0] === today.toISOString().split('T')[0]) {
                         // Moving card to today
@@ -240,7 +251,7 @@ function getAllCardsWithListId(boardId, callback) {
 }
 
 function getAllDueCards(boardId, callback) {
-    REQUEST(API_URL + '/boards/' + boardId + '/cards?fields=name,due' + API_AUTH, function(error, response, body) {
+    REQUEST(API_URL + '/boards/' + boardId + '/cards?fields=name,due,idList' + API_AUTH, function(error, response, body) {
 
         // Stop if there was an error
         if (error || response.statusCode != 200) {

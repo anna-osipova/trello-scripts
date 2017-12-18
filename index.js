@@ -3,6 +3,7 @@
 console.log('Loading function');
 
 const REQUEST = require('request');
+const fs = require('fs');
 
 var config = require('yaml-env-config')('.');
 for (let [key, val] of Object.entries(config.app.env_variables)) {
@@ -47,7 +48,11 @@ module.exports.due = (event, context, callback) => {
 }
 
 module.exports.tomorrow = (event, context, callback) => {
-  moveTomorrowToToday();
+    moveTomorrowToToday();
+}
+
+module.exports.recurring = (event, context, callback) => {
+    addRecurringTasks();
 }
 
 function orderBoard(currentDay) {
@@ -261,6 +266,43 @@ function getAllDueCards(boardId, callback) {
 
         callback(JSON.parse(body));
     });
+}
+
+function addRecurringTasks() {
+    const tasks = JSON.parse(fs.readFileSync('recurring.json', 'utf8'));
+    const cards = getAllCardsOnTrello(TODO_BOARD_ID, (cards) => {
+        getAllListsOnTrello(TODO_BOARD_ID, (listsOnTrello) => {
+            let todayColumn = null;
+            let doneColumn = null;
+
+            while (todayColumn === null) {
+                // Take the first list
+                let el = listsOnTrello.shift();
+
+                if (el.name === NAME_TODAY_COLUMN) {
+                    todayColumn = el;
+                }
+
+                if (el.name === NAME_DONE_COLUMN) {
+                    doneColumn = el;
+                }
+            }
+
+            tasks.forEach((task) => {
+                if (!(cards.find((card) => card.name === task.name && card.idList !== doneColumn))) {
+                    if (task.daysOfWeek.length && task.daysOfWeek.indexOf(new Date().getDay()) > -1) {
+                        createTrelloCard(todayColumn, task);
+                    }
+                }
+            });
+        });
+    });
+}
+
+function createTrelloCard(listId, task) {
+    console.log(`--> Creating task "${task.name}"`);
+    const labels = task.labels ? `&idLabels=${task.labels.join(',')}` : '';
+    REQUEST.post(`${API_URL}/cards?name=${task.name}&idList=${listId.id}${labels}${API_AUTH}`);
 }
 
 require('make-runnable');

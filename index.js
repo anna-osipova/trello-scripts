@@ -3,6 +3,7 @@
 console.log('Loading function');
 
 const REQUEST = require('request');
+const RP = require('request-promise-native');
 const fs = require('fs');
 
 var config = require('yaml-env-config')('.');
@@ -13,17 +14,22 @@ for (let [key, val] of Object.entries(config.app.env_variables)) {
 //
 // Configuration
 //
-const API_URL = 'https://api.trello.com/1';
+const TRELLO_API_URL = 'https://api.trello.com/1';
 const MEAL_BOARD_ID = process.env.TRELLO_MEAL_BOARD_ID;
 const TODO_BOARD_ID = process.env.TRELLO_TODO_BOARD_ID;
-const API_TOKEN = process.env.TRELLO_API_TOKEN;
-const API_KEY = process.env.TRELLO_API_KEY;
-const API_AUTH = '&key=' + API_KEY + '&token=' + API_TOKEN;
+const TRELLO_API_TOKEN = process.env.TRELLO_API_TOKEN;
+const TRELLO_API_KEY = process.env.TRELLO_API_KEY;
+const TRELLO_API_AUTH = '&key=' + TRELLO_API_KEY + '&token=' + TRELLO_API_TOKEN;
 const RESET_DAY = 6; // Sunday
 const NAME_BACKLOG_COLUMN = "Backlog";
 const NAME_TODAY_COLUMN = "Today";
 const NAME_TOMORROW_COLUMN = "Tomorrow";
 const NAME_DONE_COLUMN = "Done";
+
+const TODOIST_API_URL = 'https://beta.todoist.com/API/v8';
+const TODOIST_API_KEY = process.env.TODOIST_API_KEY;
+const TODOIST_INBOX_ID = process.env.TODOIST_INBOX_ID;
+const TRELLO_TODOIST_LABEL = process.env.TRELLO_TODOIST_LABEL;
 
 let DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 
@@ -53,6 +59,125 @@ module.exports.tomorrow = (event, context, callback) => {
 
 module.exports.recurring = (event, context, callback) => {
     addRecurringTasks();
+}
+
+module.exports.todoistToTrello = (event, context, callback) => {
+    todoistToTrello();
+}
+
+module.exports.trelloToTodoist = (event, context, callback) => {
+    trelloToTodoist();
+}
+
+async function trelloToTodoist() {
+    let todayList, doneList;
+
+    let tasks = await getTodoistInboxTasks();
+
+    let listsOnTrello = await getAllListsOnTrelloAsync(TODO_BOARD_ID);
+    listsOnTrello.forEach((list) => {
+        if (list.name.toLowerCase() === NAME_TODAY_COLUMN.toLowerCase()) {
+            todayList = list;
+        } else if (list.name.toLowerCase() === NAME_DONE_COLUMN.toLowerCase()) {
+            doneList = list;
+        }
+    });
+
+    let todayCards = await getAllCardsByBoardIdAsync(TODO_BOARD_ID);
+    todayCards = todayCards.filter(card => card.idList === todayList.id);
+
+    todayCards.forEach(card => {
+        // card has not been copied to todoist
+        if (card.idLabels.indexOf(TRELLO_TODOIST_LABEL) < 0) {
+            const matchingTasks = tasks.filter(task => task.content === card.name && task.completed === false);
+            if (!matchingTasks.length) {
+                createTodoistTask({
+                    content: card.name,
+                    completed: false,
+                    project_id: parseInt(TODOIST_INBOX_ID)
+                });
+            }
+            card.idLabels.push(TRELLO_TODOIST_LABEL);
+            updateCardLabels(card, card.idLabels);
+        }
+    });
+
+    let doneCards = await getAllCardsByBoardIdAsync(TODO_BOARD_ID);
+    doneCards = doneCards.filter(card => card.idList === doneList.id);
+
+    doneCards.forEach(card => {
+        // card has not been moved to done in todoist
+        if (card.idLabels.indexOf(TRELLO_TODOIST_LABEL) > -1) {
+            const matchingTasks = tasks.filter(task => task.content === card.name && task.completed === false);
+            matchingTasks.forEach(completeTaskInTodoist);
+            updateCardLabels(card, card.idLabels.filter(label => label !== TRELLO_TODOIST_LABEL));
+        }
+    });
+}
+
+function createTodoistTask(body) {
+    RP({
+        method: 'POST',
+        uri: `${TODOIST_API_URL}/tasks`,
+        auth: {
+            bearer: TODOIST_API_KEY
+        },
+        body,
+        json: true
+    });
+}
+
+function completeTaskInTodoist(task) {
+    RP.post(`${TODOIST_API_URL}/tasks/${task.id}`, {
+        auth: {
+            bearer: TODOIST_API_KEY
+        },
+        body: {
+            content: task.content,
+            completed: true
+        },
+        json: true
+    });
+}
+
+function updateCardLabels(card, newLabels) {
+    RP.put(`${TRELLO_API_URL}/cards/${card.id}?idLabels=${newLabels.join(',')}${TRELLO_API_AUTH}`);
+}
+
+async function todoistToTrello() {
+    let todayList, doneList;
+
+    let tasks = await getTodoistInboxTasks();
+    let listsOnTrello = await getAllListsOnTrelloAsync(TODO_BOARD_ID);
+
+    listsOnTrello.forEach((list) => {
+        if (list.name.toLowerCase() === NAME_TODAY_COLUMN.toLowerCase()) {
+            todayList = list;
+        } else if (list.name.toLowerCase() === NAME_DONE_COLUMN.toLowerCase()) {
+            doneList = list;
+        }
+    });
+
+    let cards = await getAllCardsByBoardIdAsync(TODO_BOARD_ID);
+
+    tasks.forEach(task => {
+        const matchingCards = cards.filter(card => card.name === task.content && card.idList === todayList.id);
+        if (task.completed) {
+            matchingCards.forEach(matchingCard => resetCardPosition(matchingCard, doneList));
+        } else {
+            if (!matchingCards.length) {
+                createTrelloCard(todayList, { name: task.content, labels: [TRELLO_TODOIST_LABEL] });
+            }
+        }
+    })
+}
+
+async function getTodoistInboxTasks(cb) {
+    return RP.get(`${TODOIST_API_URL}/tasks?project_id=${TODOIST_INBOX_ID}`, {
+        'auth': {
+            'bearer': TODOIST_API_KEY
+        }
+    }).then(JSON.parse);
 }
 
 function orderBoard(currentDay) {
@@ -123,10 +248,10 @@ function resetBoard(callback) {
 function resetCardPosition(card, backlogColumnObject) {
     console.log('--> Resetting card ' + card.id + ' to list' + backlogColumnObject.name + ' ' + backlogColumnObject.id);
 
-    REQUEST.put(API_URL + '/cards/' + card.id)
+    REQUEST.put(TRELLO_API_URL + '/cards/' + card.id)
         .form({
-            token: API_TOKEN,
-            key: API_KEY,
+            token: TRELLO_API_TOKEN,
+            key: TRELLO_API_KEY,
             idList: backlogColumnObject.id,
         })
         .on('response', function(response) {
@@ -137,7 +262,7 @@ function resetCardPosition(card, backlogColumnObject) {
 }
 
 function getAllCardsOnTrello(boardId, callback) {
-    REQUEST(API_URL + '/boards/' + boardId + '?lists=open&cards=visible' + API_AUTH, function(error, response, body) {
+    REQUEST(TRELLO_API_URL + '/boards/' + boardId + '?lists=open&cards=visible' + TRELLO_API_AUTH, function(error, response, body) {
 
         // Stop if there was an error
         if (error || response.statusCode != 200) {
@@ -149,8 +274,13 @@ function getAllCardsOnTrello(boardId, callback) {
     });
 }
 
+async function getAllListsOnTrelloAsync(boardId) {
+    return RP(`${TRELLO_API_URL}/boards/${boardId}/lists?fields=name,pos${TRELLO_API_AUTH}`)
+        .then(JSON.parse);
+}
+
 function getAllListsOnTrello(boardId, callback) {
-    REQUEST(API_URL + '/boards/' + boardId + '/lists?fields=name,pos' + API_AUTH, function(error, response, body) {
+    REQUEST(TRELLO_API_URL + '/boards/' + boardId + '/lists?fields=name,pos' + TRELLO_API_AUTH, function(error, response, body) {
 
         // Stop if there was an error
         if (error || response.statusCode != 200) {
@@ -165,10 +295,10 @@ function getAllListsOnTrello(boardId, callback) {
 function setPositionOfList(listId, position) {
     console.log('--> Moving list ' + listId + ' to pos ' + position);
 
-    REQUEST.put(API_URL + '/lists/' + listId)
+    REQUEST.put(TRELLO_API_URL + '/lists/' + listId)
         .form({
-            token: API_TOKEN,
-            key: API_KEY,
+            token: TRELLO_API_TOKEN,
+            key: TRELLO_API_KEY,
             pos: position
         })
         .on('response', function(response) {
@@ -242,8 +372,13 @@ function moveDue() {
     });
 }
 
+async function getAllCardsByBoardIdAsync(boardId) {
+    return RP(`${TRELLO_API_URL}/boards/${boardId}/cards?field=name,idList${TRELLO_API_AUTH}`)
+        .then(JSON.parse);
+}
+
 function getAllCardsWithListId(boardId, callback) {
-    REQUEST(API_URL + '/boards/' + boardId + '/cards?fields=name,idList' + API_AUTH, function(error, response, body) {
+    REQUEST(TRELLO_API_URL + '/boards/' + boardId + '/cards?fields=name,idList' + TRELLO_API_AUTH, function(error, response, body) {
 
         // Stop if there was an error
         if (error || response.statusCode != 200) {
@@ -256,7 +391,7 @@ function getAllCardsWithListId(boardId, callback) {
 }
 
 function getAllDueCards(boardId, callback) {
-    REQUEST(API_URL + '/boards/' + boardId + '/cards?fields=name,due,idList' + API_AUTH, function(error, response, body) {
+    REQUEST(TRELLO_API_URL + '/boards/' + boardId + '/cards?fields=name,due,idList' + TRELLO_API_AUTH, function(error, response, body) {
 
         // Stop if there was an error
         if (error || response.statusCode != 200) {
@@ -299,10 +434,10 @@ function addRecurringTasks() {
     });
 }
 
-function createTrelloCard(listId, task) {
+function createTrelloCard(list, task) {
     console.log(`--> Creating task "${task.name}"`);
     const labels = task.labels ? `&idLabels=${task.labels.join(',')}` : '';
-    REQUEST.post(`${API_URL}/cards?name=${task.name}&idList=${listId.id}${labels}${API_AUTH}`);
+    REQUEST.post(`${TRELLO_API_URL}/cards?name=${task.name}&idList=${list.id}${labels}${TRELLO_API_AUTH}`);
 }
 
 require('make-runnable');

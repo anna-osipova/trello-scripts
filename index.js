@@ -27,9 +27,11 @@ const NAME_TOMORROW_COLUMN = "Tomorrow";
 const NAME_DONE_COLUMN = "Done";
 
 const TODOIST_API_URL = 'https://beta.todoist.com/API/v8';
+const TODOIST_SYNC_API_URL = 'https://beta.todoist.com/API/v7';
 const TODOIST_API_KEY = process.env.TODOIST_API_KEY;
 const TODOIST_INBOX_ID = process.env.TODOIST_INBOX_ID;
 const TRELLO_TODOIST_LABEL = process.env.TRELLO_TODOIST_LABEL;
+const TODOIST_SYNC_TOKEN_FILE = '.todoist_sync_token';
 
 let DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 
@@ -147,28 +149,55 @@ function updateCardLabels(card, newLabels) {
 async function todoistToTrello() {
     let todayList, doneList;
 
-    let tasks = await getTodoistInboxTasks();
-    let listsOnTrello = await getAllListsOnTrelloAsync(TODO_BOARD_ID);
-
-    listsOnTrello.forEach((list) => {
-        if (list.name.toLowerCase() === NAME_TODAY_COLUMN.toLowerCase()) {
-            todayList = list;
-        } else if (list.name.toLowerCase() === NAME_DONE_COLUMN.toLowerCase()) {
-            doneList = list;
-        }
+    let todoistSyncToken = await readFileAsync(TODOIST_SYNC_TOKEN_FILE).catch(() => {
+        return '*';
     });
 
-    let cards = await getAllCardsByBoardIdAsync(TODO_BOARD_ID);
+    let updates = await getTodoistTasksSync(todoistSyncToken);
+    let taskUpdates = updates.items.filter(item => item.project_id == TODOIST_INBOX_ID);
 
-    tasks.forEach(task => {
-        const matchingCards = cards.filter(card => card.name === task.content && card.idList === todayList.id);
-        if (task.completed) {
-            matchingCards.forEach(matchingCard => resetCardPosition(matchingCard, doneList));
-        } else {
-            if (!matchingCards.length) {
-                createTrelloCard(todayList, { name: task.content, labels: [TRELLO_TODOIST_LABEL] });
+    if (taskUpdates.length) {
+        let listsOnTrello = await getAllListsOnTrelloAsync(TODO_BOARD_ID);
+
+        listsOnTrello.forEach((list) => {
+            if (list.name.toLowerCase() === NAME_TODAY_COLUMN.toLowerCase()) {
+                todayList = list;
+            } else if (list.name.toLowerCase() === NAME_DONE_COLUMN.toLowerCase()) {
+                doneList = list;
             }
-        }
+        });
+
+        let cards = await getAllCardsByBoardIdAsync(TODO_BOARD_ID);
+
+        taskUpdates.forEach(task => {
+            const matchingCards = cards.filter(card => {
+                console.log(card.name, task.content)
+                return card.name === task.content && card.idList === todayList.id
+            });
+            // TODO: remove from trello with is_deleted=1 or is_archived=1
+            if (task.checked) {
+                matchingCards.forEach(matchingCard => resetCardPosition(matchingCard, doneList));
+            } else {
+                if (!matchingCards.length) {
+                    createTrelloCard(todayList, { name: task.content, labels: [TRELLO_TODOIST_LABEL] });
+                }
+            }
+        });
+    }
+
+    todoistSyncToken = updates.sync_token;
+    fs.writeFile(TODOIST_SYNC_TOKEN_FILE, todoistSyncToken, 'utf8');
+}
+
+async function readFileAsync(filePath) {
+    return new Promise((resolve, reject) => {
+        fs.readFile(filePath, (err, result) => {
+            if (err) {
+                reject(err);
+            } else {
+                resolve(result);
+            }
+        })
     })
 }
 
@@ -176,6 +205,18 @@ async function getTodoistInboxTasks(cb) {
     return RP.get(`${TODOIST_API_URL}/tasks?project_id=${TODOIST_INBOX_ID}`, {
         'auth': {
             'bearer': TODOIST_API_KEY
+        }
+    }).then(JSON.parse);
+}
+
+async function getTodoistTasksSync(syncToken) {
+    return RP({
+        method: 'POST',
+        uri: `${TODOIST_SYNC_API_URL}/sync`,
+        formData: {
+            token: TODOIST_API_KEY,
+            sync_token: syncToken,
+            resource_types: '["items"]'
         }
     }).then(JSON.parse);
 }

@@ -2,3 +2,5 @@ node_modules
 app.yaml
 recurring.json
 *.log
+.*
+!.gitignore

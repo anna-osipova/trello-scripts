@@ -1,13 +1,14 @@
-'use strict';
+#!/usr/bin/env node
 
-console.log('Loading function');
-
-const RP = require('request-promise-native');
+const request = require('request-promise-native');
 const fs = require('fs');
+const { MongoClient } = require('mongodb');
 
-var config = require('yaml-env-config')('.');
-for (let [key, val] of Object.entries(config.app.env_variables)) {
-    process.env[key] = val;
+var config = require('yaml-env-config')('..');
+if (!process.env.HEROKU) {
+    for (let [key, val] of Object.entries(config.app.env_variables)) {
+        process.env[key] = val;
+    }
 }
 
 //
@@ -34,40 +35,19 @@ const TODOIST_SYNC_TOKEN_FILE = '.todoist_sync_token';
 
 let DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 
-module.exports.meal = (event, context, callback) => {
+exports.mealPlan = function mealPlan() {
+  // Get the current day
+  const day = (new Date().getDay() + 6) % 7;
+  const currentDay = DAYS_OF_WEEK[day];
 
-    // Get the current day
-    const day = (new Date().getDay() + 6) % 7;
-    const currentDay = DAYS_OF_WEEK[day];
-
-    // Reset the board if it's the reset day
-    if (day === RESET_DAY) {
-        resetBoard();   
-    }
-    orderBoard(currentDay);
+  // Reset the board if it's the reset day
+  if (day === RESET_DAY) {
+    resetBoard();
+  }
+  orderBoard(currentDay);
 }
 
-module.exports.due = (event, context, callback) => {
-    moveDue();
-}
-
-module.exports.tomorrow = (event, context, callback) => {
-    moveTomorrowToToday();
-}
-
-module.exports.recurring = (event, context, callback) => {
-    addRecurringTasks();
-}
-
-module.exports.todoistToTrello = (event, context, callback) => {
-    todoistToTrello();
-}
-
-module.exports.trelloToTodoist = (event, context, callback) => {
-    trelloToTodoist();
-}
-
-async function trelloToTodoist() {
+exports.trelloToTodoist = async function trelloToTodoist() {
     let todayList, doneList;
 
     let tasks = await getTodoistInboxTasks();
@@ -111,10 +91,103 @@ async function trelloToTodoist() {
             updateCardLabels(card, card.idLabels.filter(label => label !== TRELLO_TODOIST_LABEL));
         }
     });
-}
+};
+
+exports.addRecurringTasks = async function addRecurringTasks() {
+  const tasks = JSON.parse(fs.readFileSync('recurring.json', 'utf8'));
+  const cards = await getAllCardsOnTrelloAsync(TODO_BOARD_ID);
+  const listsOnTrello = await getAllListsOnTrelloAsync(TODO_BOARD_ID);
+
+  let todayColumn = null;
+  let doneColumn = null;
+
+  while (todayColumn === null) {
+    // Take the first list
+    let el = listsOnTrello.shift();
+
+    if (el.name === NAME_TODAY_COLUMN) {
+      todayColumn = el;
+    }
+
+    if (el.name === NAME_DONE_COLUMN) {
+      doneColumn = el;
+    }
+  }
+
+  tasks.forEach((task) => {
+    if (!(cards.find((card) => card.name === task.name && card.idList !== doneColumn))) {
+      if (task.daysOfWeek.length && task.daysOfWeek.indexOf(new Date().getDay()) > -1) {
+        createTrelloCard(todayColumn, task);
+      }
+    }
+  });
+};
+
+exports.moveTomorrowToToday = async function moveTomorrowToToday() {
+  let listsOnTrello = await getAllListsOnTrelloAsync(TODO_BOARD_ID);
+
+  let todayColumn = null, tomorrowColumn = null;
+
+  while (todayColumn === null || tomorrowColumn === null) {
+    let el = listsOnTrello.shift();
+
+    if (el.name === NAME_TODAY_COLUMN) {
+      todayColumn = el;
+    } else if (el.name === NAME_TOMORROW_COLUMN) {
+      tomorrowColumn = el;
+    }
+  }
+
+  const cards = await getAllCardsWithListIdAsync(TODO_BOARD_ID);
+  cards.forEach((card) => {
+    if (card.idList === tomorrowColumn.id) {
+      // Moving card to today
+      resetCardPosition(card, todayColumn);
+    }
+  });
+};
+
+exports.moveDue = async function moveDue() {
+  const today = new Date();
+  let listsOnTrello = await getAllListsOnTrelloAsync(TODO_BOARD_ID);
+
+  let todayColumn = null;
+  let doneColumn = null;
+
+  while (todayColumn === null) {
+    // Take the first list
+    let el = listsOnTrello.shift();
+
+    if (el.name === NAME_TODAY_COLUMN) {
+      todayColumn = el;
+    }
+  }
+
+  while (doneColumn === null) {
+    // Take the first list
+    let el = listsOnTrello.shift();
+
+    if (el.name === NAME_DONE_COLUMN) {
+      doneColumn = el;
+    }
+  }
+
+  const cards = await getAllDueCardsAsync(TODO_BOARD_ID);
+
+  console.log("> Updating due cards");
+  cards.forEach(function(card) {
+    if (card.due !== null && card.idList !== doneColumn.id) {
+      const due = new Date(card.due);
+      if (due.toISOString().split('T')[0] === today.toISOString().split('T')[0]) {
+        // Moving card to today
+        resetCardPosition(card, todayColumn);
+      }
+    }
+  });
+};
 
 function createTodoistTask(body) {
-    return RP({
+    return request({
         method: 'POST',
         uri: `${TODOIST_API_URL}/tasks`,
         auth: {
@@ -125,11 +198,11 @@ function createTodoistTask(body) {
     })
     .catch(err => {
         console.log("Error in createTodoistTask", err.message);
-    });;
+    });
 }
 
 function completeTaskInTodoist(task) {
-    return RP(`${TODOIST_API_URL}/tasks/${task.id}`, {
+    return request(`${TODOIST_API_URL}/tasks/${task.id}`, {
         auth: {
             bearer: TODOIST_API_KEY
         },
@@ -146,7 +219,7 @@ function completeTaskInTodoist(task) {
 }
 
 function updateCardLabels(card, newLabels) {
-    return RP({
+    return request({
         uri: `${TRELLO_API_URL}/cards/${card.id}?idLabels=${newLabels.join(',')}${TRELLO_API_AUTH}`,
         method: 'PUT',
         json: true
@@ -158,10 +231,18 @@ function updateCardLabels(card, newLabels) {
 
 async function todoistToTrello() {
     let todayList, doneList;
+    let todoistSyncToken;
 
-    let todoistSyncToken = await readFileAsync(TODOIST_SYNC_TOKEN_FILE).catch(() => {
-        return '*';
-    });
+    const db = await MongoClient.connect(process.env.MONGODB_URI);
+    const dbName = process.env.MONGODB_URI.split(/mongodb:\/\/(.+):(.+)@(.+):(\d+)\/(.+)/i)[5];
+    const dbo = db.db(dbName);
+    const dbEntry = await dbo.collection('todoist').findOne({});
+    if (dbEntry) {
+        todoistSyncToken = dbEntry.sync_token;
+    } else {
+        todoistSyncToken = '*';
+        dbo.collection('todoist').insert({ sync_token: todoistSyncToken });
+    }
 
     let updates = await getTodoistTasksAsync(todoistSyncToken);
     let taskUpdates = updates.items.filter(item => item.project_id == TODOIST_INBOX_ID);
@@ -195,10 +276,7 @@ async function todoistToTrello() {
         });
     }
 
-    todoistSyncToken = updates.sync_token;
-    fs.writeFile(TODOIST_SYNC_TOKEN_FILE, todoistSyncToken, 'utf8', (err) => {
-        if (err) console.log(err.message);
-    });
+    dbo.collection('todoist').update({ sync_token: todoistSyncToken }, { sync_token: updates.sync_token });
 }
 
 async function readFileAsync(filePath) {
@@ -214,7 +292,7 @@ async function readFileAsync(filePath) {
 }
 
 async function getTodoistInboxTasks(cb) {
-    return RP({
+    return request({
         uri: `${TODOIST_API_URL}/tasks?project_id=${TODOIST_INBOX_ID}`,
         auth: {
             'bearer': TODOIST_API_KEY
@@ -227,7 +305,7 @@ async function getTodoistInboxTasks(cb) {
 }
 
 async function getTodoistTasksAsync(syncToken) {
-    return RP({
+    return request({
         method: 'POST',
         uri: `${TODOIST_SYNC_API_URL}/sync`,
         formData: {
@@ -307,7 +385,7 @@ async function resetBoard() {
 async function resetCardPosition(card, backlogColumnObject) {
     console.log('--> Resetting card ' + card.id + ' to list' + backlogColumnObject.name + ' ' + backlogColumnObject.id);
 
-    return RP({
+    return request({
         uri: `${TRELLO_API_URL}/cards/${card.id}/?idList=${backlogColumnObject.id}${TRELLO_API_AUTH}`,
         method: 'PUT'
     })
@@ -317,7 +395,7 @@ async function resetCardPosition(card, backlogColumnObject) {
 }
 
 async function getAllCardsOnTrelloAsync(boardId) {
-    return RP({
+    return request({
         uri: `${TRELLO_API_URL}/boards/${boardId}/cards?lists=open&cards=visible${TRELLO_API_AUTH}`,
         json: true
     })
@@ -327,7 +405,7 @@ async function getAllCardsOnTrelloAsync(boardId) {
 }
 
 async function getAllListsOnTrelloAsync(boardId) {
-    return RP({
+    return request({
         uri: `${TRELLO_API_URL}/boards/${boardId}/lists?fields=name,pos${TRELLO_API_AUTH}`,
         json: true
     })
@@ -339,7 +417,7 @@ async function getAllListsOnTrelloAsync(boardId) {
 async function setPositionOfList(listId, position) {
     console.log('--> Moving list ' + listId + ' to pos ' + position);
 
-    return RP({
+    return request({
         uri: `${TRELLO_API_URL}/lists/${listId}/?pos=${position}${TRELLO_API_AUTH}`,
         method: 'PUT'
     })
@@ -348,72 +426,8 @@ async function setPositionOfList(listId, position) {
     });
 }
 
-async function moveTomorrowToToday() {
-  let listsOnTrello = await getAllListsOnTrelloAsync(TODO_BOARD_ID);
-    
-  let todayColumn = null, tomorrowColumn = null;
-
-    while (todayColumn === null || tomorrowColumn === null) {
-       let el = listsOnTrello.shift();
-
-        if (el.name === NAME_TODAY_COLUMN) {
-            todayColumn = el;
-        } else if (el.name === NAME_TOMORROW_COLUMN) {
-            tomorrowColumn = el;
-        }
-    }
-
-    getAllCardsWithListId(TODO_BOARD_ID, function(cards) {
-        cards.forEach((card) => {
-            if (card.idList === tomorrowColumn.id) {
-                // Moving card to today
-                resetCardPosition(card, todayColumn);
-            }
-        });
-    });
-}
-
-async function moveDue() {
-    const today = new Date();
-    let listsOnTrello = await getAllListsOnTrelloAsync(TODO_BOARD_ID);
-
-    let todayColumn = null;
-    let doneColumn = null;
-
-    while (todayColumn === null) {
-        // Take the first list
-        let el = listsOnTrello.shift();
-
-        if (el.name === NAME_TODAY_COLUMN) {
-            todayColumn = el;
-        }
-    }
-
-    while (doneColumn === null) {
-        // Take the first list
-        let el = listsOnTrello.shift();
-
-        if (el.name === NAME_DONE_COLUMN) {
-            doneColumn = el;
-        }
-    }
-
-    const cards = await getAllDueCardsAsync(TODO_BOARD_ID);
-
-    console.log("> Updating due cards");
-    cards.forEach(function(card) {
-        if (card.due !== null && card.idList !== doneColumn.id) {
-            const due = new Date(card.due);
-            if (due.toISOString().split('T')[0] === today.toISOString().split('T')[0]) {
-                // Moving card to today
-                resetCardPosition(card, todayColumn);
-            }
-        }
-    });
-}
-
 async function getAllCardsByBoardIdAsync(boardId) {
-    return RP({
+    return request({
         uri: `${TRELLO_API_URL}/boards/${boardId}/cards?field=name,idList${TRELLO_API_AUTH}`,
         json: true
     })
@@ -422,8 +436,8 @@ async function getAllCardsByBoardIdAsync(boardId) {
     });
 }
 
-function getAllCardsWithListId(boardId, callback) {
-    return RP({
+async function getAllCardsWithListIdAsync(boardId, callback) {
+    return request({
         uri: `${TRELLO_API_URL}/boards/${boardId}/cards?fields=name,idList${TRELLO_API_AUTH}`,
         json: true
     })
@@ -433,7 +447,7 @@ function getAllCardsWithListId(boardId, callback) {
 }
 
 function getAllDueCardsAsync(boardId) {
-    return RP({
+    return request({
         uri: `${TRELLO_API_URL}/boards/${boardId}/cards?fields=name,due,idList${TRELLO_API_AUTH}`,
         json: true
     })
@@ -442,47 +456,15 @@ function getAllDueCardsAsync(boardId) {
     });
 }
 
-async function addRecurringTasks() {
-    const tasks = JSON.parse(fs.readFileSync('recurring.json', 'utf8'));
-    const cards = await getAllCardsOnTrelloAsync(TODO_BOARD_ID);
-    const listsOnTrello = await getAllListsOnTrelloAsync(TODO_BOARD_ID);
-
-    let todayColumn = null;
-    let doneColumn = null;
-
-    while (todayColumn === null) {
-        // Take the first list
-        let el = listsOnTrello.shift();
-
-        if (el.name === NAME_TODAY_COLUMN) {
-            todayColumn = el;
-        }
-
-        if (el.name === NAME_DONE_COLUMN) {
-            doneColumn = el;
-        }
-    }
-
-    tasks.forEach((task) => {
-        if (!(cards.find((card) => card.name === task.name && card.idList !== doneColumn))) {
-            if (task.daysOfWeek.length && task.daysOfWeek.indexOf(new Date().getDay()) > -1) {
-                createTrelloCard(todayColumn, task);
-            }
-        }
-    });
-}
-
 function createTrelloCard(list, task) {
     console.log(`--> Creating task "${task.name}"`);
     const labels = task.labels ? `&idLabels=${task.labels.join(',')}` : '';
-    RP({
+    request({
         uri: `${TRELLO_API_URL}/cards?name=${task.name}&idList=${list.id}${labels}${TRELLO_API_AUTH}`,
         method: 'POST',
         json: true
     })
     .catch(err => {
         console.log("Error in createTrelloCard", err.message);
-    });;
+    });
 }
-
-require('make-runnable');
